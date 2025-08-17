@@ -3,3 +3,4 @@ rust-project.json
 .serena
 /node_modules
 .vscode
+.mcp.json
