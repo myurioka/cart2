@@ -143,9 +143,9 @@ impl GameStageState<Ready> {
             material: self.material,
         }
     }
-    /// Handle key input in Ready state (start game with space key)
+    /// Handle key input in Ready state (start game with space key or touch start)
     fn update(self, _keystate: &KeyState) -> ReadyEndState {
-        if _keystate.is_pressed("Space") {
+        if _keystate.is_pressed("Space") || _keystate.touch_start_detected() {
             return ReadyEndState::Complete(self.start_running());
         }
         ReadyEndState::Continue(self)
@@ -251,23 +251,66 @@ impl GameStageState<Playing> {
             }
         }
 
-        if _keystate.is_pressed("ArrowUp") && _velocity.y < VELOCITY_LIMIT {
-            _velocity.y += VELOCITY_STEP;
+        // Handle keyboard input
+        let keyboard_input_active = _keystate.is_pressed("ArrowUp") || _keystate.is_pressed("ArrowDown") ||
+                                   _keystate.is_pressed("ArrowLeft") || _keystate.is_pressed("ArrowRight") ||
+                                   _keystate.is_pressed("Space");
+
+        if keyboard_input_active {
+            if _keystate.is_pressed("ArrowUp") && _velocity.y < VELOCITY_LIMIT {
+                _velocity.y += VELOCITY_STEP;
+            }
+            if _keystate.is_pressed("ArrowDown") {
+                _velocity.x = 0.0;
+                // Return cart to normal
+                self.material.cart.set_direction(CarDirection::Normal);
+            }
+            if _keystate.is_pressed("ArrowLeft") {
+                _velocity.x = -VELOCITY_X;
+            } else if _keystate.is_pressed("ArrowRight") {
+                _velocity.x = VELOCITY_X;
+            } else if !_keystate.is_pressed("ArrowDown") {
+                // Stop horizontal movement if no left/right key pressed and not pressing down
+                _velocity.x = 0.0;
+                self.material.cart.set_direction(CarDirection::Normal);
+            }
+            if _keystate.is_pressed("Space") {
+                _velocity.y -= VELOCITY_BRAKE_STEP;
+                self.material.music.clone().play_brake_sound();
+            }
         }
-        if _keystate.is_pressed("ArrowDown") {
+        // Handle touch input for car control
+        else if _keystate.is_touching() {
+            let (touch_x, touch_y) = _keystate.get_touch_position();
+            let (touch_start_x, touch_start_y) = _keystate.get_touch_start_position();
+
+            // Reset horizontal velocity first
             _velocity.x = 0.0;
-            // Return cart to normal
             self.material.cart.set_direction(CarDirection::Normal);
+
+            // Left movement: current touch X < touch start X
+            if touch_x < touch_start_x {
+                _velocity.x = -VELOCITY_X;
+            }
+            // Right movement: current touch X > touch start X
+            else if touch_x > touch_start_x {
+                _velocity.x = VELOCITY_X;
+            }
+
+            // Acceleration: current touch Y < touch start Y
+            if touch_y < touch_start_y && _velocity.y < VELOCITY_LIMIT {
+                _velocity.y += VELOCITY_STEP;
+            }
+            // Deceleration: current touch Y > touch start Y
+            else if touch_y > touch_start_y {
+                _velocity.y -= VELOCITY_BRAKE_STEP;
+                self.material.music.clone().play_brake_sound();
+            }
         }
-        if _keystate.is_pressed("ArrowLeft") {
-            _velocity.x = -VELOCITY_X;
-        }
-        if _keystate.is_pressed("ArrowRight") {
-            _velocity.x = VELOCITY_X;
-        }
-        if _keystate.is_pressed("Space") {
-            _velocity.y -= VELOCITY_BRAKE_STEP;
-            self.material.music.clone().play_brake_sound();
+        // No input - stop horizontal movement
+        else {
+            _velocity.x = 0.0;
+            self.material.cart.set_direction(CarDirection::Normal);
         }
         // velocity limit
         if _velocity.y < VELOCITY_ZERO {

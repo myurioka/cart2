@@ -20,7 +20,15 @@
     <body onload="document.getElementById('canvas').focus()">
         <div class="flexbox-container">
             <div class="item_1">
-                <canvas id="canvas" tabindex="0" height="1000" width="800">
+                <canvas
+                    id="canvas"
+                    tabindex="0"
+                    height="1000"
+                    width="800"
+                    style="touch-action: none;"
+                    ontouchstart="return false;"
+                    ontouchmove="return false;"
+                    ontouchend="return false;">
                     Your browser does not support the Canvas.
                 </canvas>
             </div>

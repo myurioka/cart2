@@ -901,7 +901,7 @@ type SharedLoopClosure = Rc<RefCell<Option<LoopClosure>>>;
 
 impl GameLoop {
     pub async fn start(game: impl Game + 'static) -> Result<()> {
-        let mut keyevent_receiver = prepare_input()?;
+        let (mut keyevent_receiver, mut touchevent_receiver) = prepare_input()?;
         let mut game = game.initialize().await?;
         let mut game_loop = GameLoop {
             last_frame: browser::now()?,
@@ -917,7 +917,7 @@ impl GameLoop {
 
         let mut keystate = KeyState::new();
         *g.borrow_mut() = Some(browser::create_raf_closure(move |perf: f64| {
-            process_input(&mut keystate, &mut keyevent_receiver);
+            process_input(&mut keystate, &mut keyevent_receiver, &mut touchevent_receiver);
 
             game_loop.accumulated_delta += perf - game_loop.last_frame;
             while game_loop.accumulated_delta > FRAME_SIZE {
@@ -942,12 +942,14 @@ impl GameLoop {
 
 pub struct KeyState {
     pressed_keys: HashMap<String, web_sys::KeyboardEvent>,
+    touch_state: TouchState,
 }
 
 impl KeyState {
     fn new() -> Self {
         KeyState {
             pressed_keys: HashMap::new(),
+            touch_state: TouchState::default(),
         }
     }
     pub fn is_pressed(&self, code: &str) -> bool {
@@ -961,6 +963,36 @@ impl KeyState {
     fn set_released(&mut self, code: &str) {
         self.pressed_keys.remove(code);
     }
+
+    pub fn is_touching(&self) -> bool {
+        self.touch_state.is_touching
+    }
+
+    pub fn get_touch_position(&self) -> (f64, f64) {
+        (self.touch_state.touch_x, self.touch_state.touch_y)
+    }
+
+    pub fn get_touch_start_position(&self) -> (f64, f64) {
+        (self.touch_state.touch_start_x, self.touch_state.touch_start_y)
+    }
+
+    pub fn touch_start_detected(&self) -> bool {
+        self.touch_state.touch_start_detected
+    }
+
+    pub fn set_touch_start_detected(&mut self, detected: bool) {
+        self.touch_state.touch_start_detected = detected;
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct TouchState {
+    is_touching: bool,
+    touch_x: f64,
+    touch_y: f64,
+    touch_start_x: f64,
+    touch_start_y: f64,
+    touch_start_detected: bool,
 }
 
 enum KeyPress {
@@ -968,7 +1000,17 @@ enum KeyPress {
     KeyDown(web_sys::KeyboardEvent),
 }
 
-fn process_input(state: &mut KeyState, keyevent_receiver: &mut UnboundedReceiver<KeyPress>) {
+enum TouchPress {
+    TouchStart(web_sys::TouchEvent),
+    TouchMove(web_sys::TouchEvent),
+    TouchEnd(web_sys::TouchEvent),
+}
+
+fn process_input(
+    state: &mut KeyState,
+    keyevent_receiver: &mut UnboundedReceiver<KeyPress>,
+    touchevent_receiver: &mut UnboundedReceiver<TouchPress>
+) {
     loop {
         match keyevent_receiver.try_next() {
             Ok(None) => break,
@@ -979,13 +1021,62 @@ fn process_input(state: &mut KeyState, keyevent_receiver: &mut UnboundedReceiver
             },
         };
     }
+
+    loop {
+        match touchevent_receiver.try_next() {
+            Ok(None) => break,
+            Err(_err) => break,
+            Ok(Some(evt)) => match evt {
+                TouchPress::TouchStart(evt) => {
+                    log!("TouchStart event received");
+                    if let Some(touch) = evt.touches().item(0) {
+                        if let Some(canvas) = browser::canvas().ok() {
+                            let rect = canvas.unchecked_ref::<web_sys::Element>().get_bounding_client_rect();
+                            let canvas_x = touch.client_x() as f64 - rect.left();
+                            let canvas_y = touch.client_y() as f64 - rect.top();
+
+                            state.touch_state.is_touching = true;
+                            state.touch_state.touch_x = canvas_x;
+                            state.touch_state.touch_y = canvas_y;
+                            state.touch_state.touch_start_x = canvas_x;
+                            state.touch_state.touch_start_y = canvas_y;
+                            state.touch_state.touch_start_detected = true;
+                            log!("Touch detected at: ({}, {})", canvas_x, canvas_y);
+                        }
+                    }
+                }
+                TouchPress::TouchMove(evt) => {
+                    if let Some(touch) = evt.touches().item(0) {
+                        if let Some(canvas) = browser::canvas().ok() {
+                            let rect = canvas.unchecked_ref::<web_sys::Element>().get_bounding_client_rect();
+                            let canvas_x = touch.client_x() as f64 - rect.left();
+                            let canvas_y = touch.client_y() as f64 - rect.top();
+
+                            state.touch_state.touch_x = canvas_x;
+                            state.touch_state.touch_y = canvas_y;
+                        }
+                    }
+                }
+                TouchPress::TouchEnd(_) => {
+                    state.touch_state.is_touching = false;
+                    state.touch_state.touch_start_detected = false;
+                }
+            },
+        };
+    }
 }
 
-// For Keypress Input
-fn prepare_input() -> Result<UnboundedReceiver<KeyPress>> {
+// For Input (Keyboard and Touch)
+fn prepare_input() -> Result<(UnboundedReceiver<KeyPress>, UnboundedReceiver<TouchPress>)> {
     let (keydown_sender, keyevent_receiver) = unbounded();
     let keydown_sender = Rc::new(RefCell::new(keydown_sender));
     let keyup_sender = Rc::clone(&keydown_sender);
+
+    let (touchevent_sender, touchevent_receiver) = unbounded();
+    let touchstart_sender = Rc::new(RefCell::new(touchevent_sender));
+    let touchmove_sender = Rc::clone(&touchstart_sender);
+    let touchend_sender = Rc::clone(&touchstart_sender);
+
     let onkeydown = browser::closure_wrap(Box::new(move |keycode: web_sys::KeyboardEvent| {
         let _ = keydown_sender
             .borrow_mut()
@@ -998,12 +1089,43 @@ fn prepare_input() -> Result<UnboundedReceiver<KeyPress>> {
             .start_send(KeyPress::KeyUp(keycode));
     }) as Box<dyn FnMut(web_sys::KeyboardEvent)>);
 
-    browser::canvas()?.set_onkeydown(Some(onkeydown.as_ref().unchecked_ref()));
-    browser::canvas()?.set_onkeyup(Some(onkeyup.as_ref().unchecked_ref()));
+    let ontouchstart = browser::closure_wrap(Box::new(move |touchevent: web_sys::TouchEvent| {
+        touchevent.prevent_default();
+        let _ = touchstart_sender
+            .borrow_mut()
+            .start_send(TouchPress::TouchStart(touchevent));
+    }) as Box<dyn FnMut(web_sys::TouchEvent)>);
+
+    let ontouchmove = browser::closure_wrap(Box::new(move |touchevent: web_sys::TouchEvent| {
+        touchevent.prevent_default();
+        let _ = touchmove_sender
+            .borrow_mut()
+            .start_send(TouchPress::TouchMove(touchevent));
+    }) as Box<dyn FnMut(web_sys::TouchEvent)>);
+
+    let ontouchend = browser::closure_wrap(Box::new(move |touchevent: web_sys::TouchEvent| {
+        touchevent.prevent_default();
+        let _ = touchend_sender
+            .borrow_mut()
+            .start_send(TouchPress::TouchEnd(touchevent));
+    }) as Box<dyn FnMut(web_sys::TouchEvent)>);
+
+    let canvas = browser::canvas()?;
+    canvas.set_onkeydown(Some(onkeydown.as_ref().unchecked_ref()));
+    canvas.set_onkeyup(Some(onkeyup.as_ref().unchecked_ref()));
+
+    // Touch events
+    canvas.set_ontouchstart(Some(ontouchstart.as_ref().unchecked_ref()));
+    canvas.set_ontouchmove(Some(ontouchmove.as_ref().unchecked_ref()));
+    canvas.set_ontouchend(Some(ontouchend.as_ref().unchecked_ref()));
+
     onkeydown.forget();
     onkeyup.forget();
+    ontouchstart.forget();
+    ontouchmove.forget();
+    ontouchend.forget();
 
-    Ok(keyevent_receiver)
+    Ok((keyevent_receiver, touchevent_receiver))
 }
 
 #[derive(Clone)]
