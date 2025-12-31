@@ -1,10 +1,12 @@
-# Cart2 - CartClaude
+# Cart2  🏎 - CartClaude
 
 A retro-style mini cart game
 
 ## 📖 Overview
 
 Cart2 (CartClaude) is a browser-based retro game built with WebAssembly (Rust) and JavaScript. Players control a cart to reach the goal.
+
+[Play in browser](https://myurioka.github.io/cart2)
 
 ## 🚀 Tech Stack
 
